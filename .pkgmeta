@@ -1,0 +1,24 @@
+package-as: ShowMyVaults
+enable-nolib-creation: no
+
+# Use the hand-written changelog as the CurseForge file changelog instead of
+# the packager's auto-generated git log (staging commits are just
+# "release: vX.Y.Z", which tells users nothing). The ignore list below still
+# keeps CHANGELOG.md out of the addon zip itself.
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+# Keep repo/meta files out of the distributed addon zip. WoW only needs the
+# .lua and .toc; everything below is for GitHub/CurseForge, not the game.
+# (AGENTS.md and docs/ never reach the staging repo at all - the publish
+# dev-file filter strips them - but they are listed anyway as a second fence.)
+ignore:
+  - .github
+  - .gitignore
+  - .pkgmeta
+  - .publish-state.json
+  - AGENTS.md
+  - docs
+  - README.md
+  - CHANGELOG.md

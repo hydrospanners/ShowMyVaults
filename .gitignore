@@ -1,0 +1,9 @@
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.log
+*.bak
+.vscode/
+.idea/
