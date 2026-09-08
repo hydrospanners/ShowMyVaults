@@ -8,19 +8,39 @@ local holder
 local slotTexts = {}
 local waitingText
 
+-- The side panel: one frame, two contents (a slot's full roster, or the
+-- waiting list). Parented to WeeklyRewardsFrame, so it moves with the
+-- window and dies with it.
+local sidePanel
+local slotButtons = {}
+local waitingButton
+
 -- Offsets tuned by eye against the live window. They are measurements, not
 -- derivations -- do not "correct" them from the XML.
 local STACK_RIGHT_INSET = 15   -- same inset as Blizzard's Progress fontstring
 local STACK_BOTTOM = 30        -- Blizzard's fraction bottom sits at 15; this clears it
 local MAX_LINES = 4            -- per-slot cap, earned lines win the spots
-local MAX_WAITING_NAMES = 7    -- gold-line cap; more collapse into "+N more"
+local MAX_WAITING_NAMES = 4    -- gold-line cap; the side panel shows the rest
 
--- The gold claim line sits in the empty strip under the World row. Measured
--- from the frame's TOP edge on purpose: the frame grows downward (657 -> 737)
--- during the claim flow, so bottom-relative offsets move and top-relative
--- ones do not. Rows end at -601; the claim-mode coin row starts at -629.
-local WAITING_LEFT = 68
-local WAITING_TOP = -612
+-- The gold claim line sits centered in the header strip: the gap between
+-- Blizzard's header text (bottom near -119) and the first activity row
+-- (top -149). Moved up from the bottom strip 2026-08-25 -- Season 2 keeps
+-- the Collect bar and its "Or" divider down there full-time, and the line
+-- collided with them. Nothing else renders in the header strip.
+local WAITING_TOP = -124
+
+-- Side panel geometry. The panel is a full-height wing of the window: top
+-- and bottom anchored to the window's edges, so it matches the window's
+-- height exactly, including the claim-mode growth.
+-- Negative on purpose: both the window and the panel inset their background
+-- art 10px from the frame edge, so frame-edge gap G reads as G+20 of empty
+-- space. -14 lands the visible seam around 6px.
+local PANEL_GAP = -14
+local PANEL_PAD = 20           -- inner padding; the names read cramped at less
+local PANEL_MIN_WIDTH = 230
+local MAX_PANEL_ROWS = 30      -- roster cap; the wing's height is finite too
+local STACK_CLICK_MAX_WIDTH = 175  -- hitbox clamp: long names must not eat
+                                   -- clicks meant for Blizzard's slot
 
 local WHITE = "|cffffffff"
 local GREEN = "|cff19ff19"
@@ -180,18 +200,62 @@ local function CompareSlotEntries(a, b)
     return a.name < b.name
 end
 
+-- /smv test swaps the display's data source for this table until toggled
+-- off or /reload. Runtime only, never written to SavedVariables -- the fake
+-- rows run through the same pipeline as real ones, so the caps, colors and
+-- realm rules being previewed are the real code paths.
+local testChars
+
+local function BuildTestChars()
+    local enum = Enum and Enum.WeeklyRewardChestThresholdType
+    if not enum then return end
+    local D, R, W = enum.Activities, enum.Raid, enum.World
+    local function acts(dungeons, raid, world)
+        return {
+            [D] = { progress = dungeons, thresholds = { 1, 4, 8 } },
+            [R] = { progress = raid, thresholds = { 2, 4, 6 } },
+            [W] = { progress = world, thresholds = { 2, 4, 8 } },
+        }
+    end
+    local chars = {
+        -- Full clear, everything green, plus a waiting vault.
+        ["Testwarrior-Ragnaros"] = { class = "WARRIOR", acts = acts(8, 6, 8), unclaimed = true },
+        -- Mixed progress, nothing waiting.
+        ["Testmage-Ragnaros"] = { class = "MAGE", acts = acts(6, 3, 1) },
+        -- Barely started, vault waiting anyway.
+        ["Testpriest-Ragnaros"] = { class = "PRIEST", acts = acts(1, 0, 4), unclaimed = true },
+        ["Testrogue-Ragnaros"] = { class = "ROGUE", acts = acts(4, 2, 0), unclaimed = true },
+        -- Pending markers: gold line only, no stacks (post-reset state).
+        ["Testdruid-Ragnaros"] = { class = "DRUID", pending = true },
+        ["Testpala-Silvermoon"] = { class = "PALADIN", pending = true },
+        ["Testshaman-Ragnaros"] = { class = "SHAMAN", pending = true },
+        -- Zero dungeons: stays off the Dungeons row entirely.
+        ["Testlock-Ragnaros"] = { class = "WARLOCK", acts = acts(0, 5, 2), unclaimed = true },
+    }
+    -- A twin of the logged-in character on another realm: exercises the rule
+    -- that an alt sharing your name must carry its realm.
+    local selfName = UnitName("player")
+    if selfName then
+        chars[selfName .. "-Testrealm"] = { class = "HUNTER", acts = acts(7, 0, 0), unclaimed = true }
+    end
+    return chars
+end
+
 -- Every stored character except the one being played -- Blizzard's own
 -- fraction already is the player's line. The realm suffix appears only when
 -- two characters share a name, or always via the option.
 local function GatherChars()
     local db = ShowMyVaultsDB
-    if not db or not db.chars then return {} end
+    if not db then return {} end
+
+    local chars = testChars or db.chars
+    if not chars then return {} end
 
     local selfKey = CharacterKey()
     local shown = db.shown or {}
     local nameCounts, rows = {}, {}
 
-    for key, entry in pairs(db.chars) do
+    for key, entry in pairs(chars) do
         if key ~= selfKey and type(entry) == "table" and shown[key] ~= false then
             local name, realm = key:match("^(.-)%-(.+)$")
             if name then
@@ -264,6 +328,236 @@ local function BuildSlotLines(rows, activityType, index)
     return table.concat(lines, "\n")
 end
 
+local rowNames
+local function RowName(activityType)
+    if not rowNames then
+        local enum = Enum and Enum.WeeklyRewardChestThresholdType
+        if not enum then return "" end
+        rowNames = {}
+        if enum.Raid then rowNames[enum.Raid] = RAIDS end
+        if enum.Activities then rowNames[enum.Activities] = DUNGEONS end
+        if enum.RankedPvP then rowNames[enum.RankedPvP] = PVP end
+        if enum.World then rowNames[enum.World] = WORLD end
+    end
+    return rowNames[activityType] or ""
+end
+
+local function CountEarnedSlots(acts)
+    if type(acts) ~= "table" then return 0 end
+    local earned = 0
+    for _, act in pairs(acts) do
+        if type(act) == "table" and type(act.thresholds) == "table" then
+            for i = 1, 3 do
+                local threshold = act.thresholds[i]
+                if type(threshold) == "number" and threshold > 0
+                    and (act.progress or 0) >= threshold then
+                    earned = earned + 1
+                end
+            end
+        end
+    end
+    return earned
+end
+
+-- A full-height wing of the vault window: the window's own back and
+-- back-shadow atlases, deliberately NO border (the ornate frame atlas
+-- squished badly at panel width -- Developer dumped it, 2026-08-25), their
+-- row divider under the title, and a close button mirroring the window's
+-- white X. Child of WeeklyRewardsFrame: moves with it, hides with it,
+-- matches its height through the claim-mode growth.
+local function GetSidePanel()
+    if sidePanel then return sidePanel end
+
+    local panel = CreateFrame("Frame", "ShowMyVaultsSidePanel", WeeklyRewardsFrame)
+    panel:SetFrameLevel(600)
+    panel:SetPoint("TOPLEFT", WeeklyRewardsFrame, "TOPRIGHT", PANEL_GAP, 0)
+    panel:SetPoint("BOTTOMLEFT", WeeklyRewardsFrame, "BOTTOMRIGHT", PANEL_GAP, 0)
+    panel:SetWidth(PANEL_MIN_WIDTH)
+    panel:Hide()
+
+    -- Same three layers, same insets, as WeeklyRewardsFrame's own XML.
+    local bg = panel:CreateTexture(nil, "BACKGROUND")
+    bg:SetAtlas("evergreen-weeklyrewards-frame-back")
+    bg:SetPoint("TOPLEFT", 10, -8)
+    bg:SetPoint("BOTTOMRIGHT", -10, 8)
+
+    local shadow = panel:CreateTexture(nil, "BORDER")
+    shadow:SetAtlas("evergreen-weeklyrewards-frame-back-shadow")
+    shadow:SetPoint("TOPLEFT", 10, -8)
+    shadow:SetPoint("BOTTOMRIGHT", -10, 8)
+
+    -- The window's white X is painted by the UI skin as its own overlay
+    -- while the button's real textures sit empty -- mirroring those made an
+    -- invisible button. A plain text glyph renders identically everywhere,
+    -- and text is this addon's native material anyway. White, gold on hover.
+    local close = CreateFrame("Button", nil, panel)
+    close:SetSize(24, 24)
+    close:SetPoint("TOPRIGHT", -8, -6)
+    close:SetFrameLevel(panel:GetFrameLevel() + 2)
+    close.Label = close:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+    close.Label:SetPoint("CENTER")
+    close.Label:SetText("×")
+    close:SetScript("OnClick", function() panel:Hide() end)
+    close:SetScript("OnEnter", function(self) self.Label:SetTextColor(1, 0.82, 0) end)
+    close:SetScript("OnLeave", function(self) self.Label:SetTextColor(1, 1, 1) end)
+
+    panel.Title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    panel.Title:SetJustifyH("LEFT")
+    panel.Title:SetWordWrap(true)
+    panel.Title:SetPoint("TOPLEFT", PANEL_PAD, -PANEL_PAD - 8)
+
+    panel.Sub = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    panel.Sub:SetJustifyH("LEFT")
+    panel.Sub:SetWordWrap(true)
+    panel.Sub:SetPoint("TOPLEFT", panel.Title, "BOTTOMLEFT", 0, -3)
+
+    -- The window's own row divider at native height, narrowed to the panel.
+    panel.Divider = panel:CreateTexture(nil, "ARTWORK")
+    panel.Divider:SetAtlas("evergreen-weeklyrewards-divider", true)
+    panel.Divider:SetPoint("TOPLEFT", panel.Sub, "BOTTOMLEFT", 0, -8)
+
+    panel.Left = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    panel.Left:SetJustifyH("LEFT")
+    panel.Left:SetSpacing(4)
+    panel.Left:SetPoint("TOPLEFT", panel.Divider, "BOTTOMLEFT", 0, -9)
+
+    panel.Right = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    panel.Right:SetJustifyH("RIGHT")
+    panel.Right:SetSpacing(4)
+    panel.Right:SetPoint("TOP", panel.Left, "TOP", 0, 0)
+    panel.Right:SetPoint("RIGHT", panel, "RIGHT", -PANEL_PAD, 0)
+
+    sidePanel = panel
+    return panel
+end
+
+-- The wing's height is the window's, so rosters cap too: past
+-- MAX_PANEL_ROWS the rest folds into a grey "+N more", same pattern as
+-- everywhere else. Applied before the player's own appended row.
+local function CapPanelRows(left, right)
+    if #left <= MAX_PANEL_ROWS then return end
+    local extra = #left - MAX_PANEL_ROWS
+    for i = #left, MAX_PANEL_ROWS + 1, -1 do
+        left[i], right[i] = nil, nil
+    end
+    left[MAX_PANEL_ROWS + 1] = ("%s+%d more|r"):format(GREY, extra)
+    right[MAX_PANEL_ROWS + 1] = ""
+end
+
+-- Width from the roster columns; the title and sub then word-wrap inside it
+-- instead of dictating it. Height comes from the window anchors.
+local function LayoutSidePanel(panel)
+    local width = math.max(
+        PANEL_MIN_WIDTH,
+        panel.Left:GetStringWidth() + panel.Right:GetStringWidth() + PANEL_PAD * 2 + 30)
+    panel:SetWidth(width)
+    panel.Title:SetWidth(width - PANEL_PAD * 2 - 22)
+    panel.Sub:SetWidth(width - PANEL_PAD * 2)
+    panel.Divider:SetWidth(width - PANEL_PAD * 2)
+end
+
+-- All characters' progress toward one slot, uncapped, plus the player's own
+-- line at the bottom. The one place the player appears by name: a full
+-- roster list has no room for the unnamed-line convention.
+local function FillSlotPanel(slot)
+    local panel = GetSidePanel()
+    local rows = GatherChars()
+
+    local entries = {}
+    for _, row in ipairs(rows) do
+        local act = row.acts and row.acts[slot.type]
+        if type(act) ~= "table" then act = nil end
+        local slotThreshold = act and type(act.thresholds) == "table" and act.thresholds[slot.index]
+        local progress = act and act.progress or 0
+        if type(slotThreshold) == "number" and slotThreshold > 0 and progress > 0 then
+            entries[#entries + 1] = {
+                label = row.label,
+                name = row.name,
+                progress = progress,
+                threshold = slotThreshold,
+                earned = progress >= slotThreshold,
+            }
+        end
+    end
+    table.sort(entries, CompareSlotEntries)
+
+    local left, right = {}, {}
+    for _, entry in ipairs(entries) do
+        left[#left + 1] = entry.label
+        local color = entry.earned and GREEN or WHITE
+        right[#right + 1] = ("%s%d/%d|r"):format(
+            color, math.min(entry.progress, entry.threshold), entry.threshold)
+    end
+    CapPanelRows(left, right)
+
+    -- The player, greyed, from their own stored row.
+    local db = ShowMyVaultsDB
+    local selfKey = CharacterKey()
+    local selfEntry = db and db.chars and selfKey and db.chars[selfKey]
+    local selfAct = selfEntry and type(selfEntry.acts) == "table" and selfEntry.acts[slot.type]
+    if type(selfAct) ~= "table" then selfAct = nil end
+    local selfThreshold = selfAct and type(selfAct.thresholds) == "table" and selfAct.thresholds[slot.index]
+    if type(selfThreshold) == "number" and selfThreshold > 0 and (selfAct.progress or 0) > 0 then
+        left[#left + 1] = ("%s%s (%s)|r"):format(GREY, UnitName("player") or "?", "you")
+        local color = (selfAct.progress or 0) >= selfThreshold and GREEN or WHITE
+        right[#right + 1] = ("%s%d/%d|r"):format(
+            color, math.min(selfAct.progress, selfThreshold), selfThreshold)
+    end
+
+    panel.Title:SetText(RowName(slot.type))
+    panel.Sub:SetText("Progress toward this slot")
+    panel.Left:SetText(table.concat(left, "\n"))
+    panel.Right:SetText(table.concat(right, "\n"))
+    LayoutSidePanel(panel)
+    panel.currentKind, panel.currentSlot = "slot", slot
+end
+
+local function FillWaitingPanel()
+    local panel = GetSidePanel()
+    local rows = GatherChars()
+
+    local left, right = {}, {}
+    for _, row in ipairs(rows) do
+        if row.waiting then
+            left[#left + 1] = row.label
+            if row.acts then
+                local earned = CountEarnedSlots(row.acts)
+                right[#right + 1] = ("%s%d %s|r"):format(GREY, earned, earned == 1 and "slot" or "slots")
+            else
+                right[#right + 1] = GREY .. "since reset|r"
+            end
+        end
+    end
+    CapPanelRows(left, right)
+
+    panel.Title:SetText("Vault waiting")
+    panel.Sub:SetText("Unopened vaults")
+    panel.Left:SetText(table.concat(left, "\n"))
+    panel.Right:SetText(table.concat(right, "\n"))
+    LayoutSidePanel(panel)
+    panel.currentKind, panel.currentSlot = "waiting", nil
+end
+
+local function ToggleSlotPanel(slot)
+    local panel = GetSidePanel()
+    if panel:IsShown() and panel.currentSlot == slot then
+        panel:Hide()
+        return
+    end
+    FillSlotPanel(slot)
+    panel:Show()
+end
+
+local function ToggleWaitingPanel()
+    local panel = GetSidePanel()
+    if panel:IsShown() and panel.currentKind == "waiting" then
+        panel:Hide()
+        return
+    end
+    FillWaitingPanel()
+    panel:Show()
+end
+
 local function Refresh()
     if not ShowMyVaultsDB then return end
 
@@ -276,6 +570,9 @@ local function Refresh()
 
     if ShowMyVaultsDB.hidden then
         holder:Hide()
+        -- The panel is a child of the window, not of holder -- hiding the
+        -- display must take it along or it lingers stale and clickable.
+        if sidePanel then sidePanel:Hide() end
         return
     end
 
@@ -297,7 +594,12 @@ local function Refresh()
     local activities = WeeklyRewardsFrame and WeeklyRewardsFrame.Activities
     if type(activities) == "table" then
         for _, slot in ipairs(activities) do
-            if IsTrackedType(slot.type) and type(slot.index) == "number" then
+            if not (IsTrackedType(slot.type) and type(slot.index) == "number") then
+                -- A frame whose type ever left the tracked set keeps no
+                -- leftovers: hide anything created for it earlier.
+                if slotTexts[slot] then slotTexts[slot]:Hide() end
+                if slotButtons[slot] then slotButtons[slot]:Hide() end
+            else
                 local fs = slotTexts[slot]
                 if not fs then
                     fs = holder:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -314,6 +616,35 @@ local function Refresh()
                 fs:SetText(text or "")
                 fs:SetShown(text ~= nil)
                 anyText = anyText or text ~= nil
+
+                -- An invisible button hugging exactly the stack text: click
+                -- opens the side panel with this slot's full roster. Hugging
+                -- matters -- the rest of the slot stays Blizzard's, including
+                -- reward picking and the preview tooltip.
+                local btn = slotButtons[slot]
+                if not btn then
+                    btn = CreateFrame("Button", nil, holder)
+                    btn:RegisterForClicks("LeftButtonUp")
+                    btn:SetScript("OnClick", function() ToggleSlotPanel(slot) end)
+                    btn:SetScript("OnEnter", function(self)
+                        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                        GameTooltip:SetText("This slot's roster", 1, 1, 1)
+                        GameTooltip:Show()
+                    end)
+                    btn:SetScript("OnLeave", GameTooltip_Hide)
+                    slotButtons[slot] = btn
+                end
+                if text then
+                    btn:ClearAllPoints()
+                    btn:SetPoint("BOTTOMRIGHT", slot, "BOTTOMRIGHT",
+                        -STACK_RIGHT_INSET, STACK_BOTTOM)
+                    btn:SetSize(
+                        math.min(math.max(fs:GetStringWidth(), 1), STACK_CLICK_MAX_WIDTH),
+                        math.max(fs:GetStringHeight(), 1))
+                    btn:Show()
+                else
+                    btn:Hide()
+                end
             end
         end
     end
@@ -337,11 +668,57 @@ local function Refresh()
             end
             waiting[MAX_WAITING_NAMES + 1] = ("%s+%d more|r"):format(GREY, extra)
         end
-        waitingText:SetText(("%sVault waiting:|r %s"):format(GOLD, table.concat(waiting, ", ")))
+        -- The [test] prefix is the on-screen sign that /smv test data is
+        -- active (the fake roster always has waiting vaults, so the gold
+        -- line is a reliable carrier).
+        local prefix = testChars and (GREY .. "[test]|r ") or ""
+        waitingText:SetText(("%s%sVault waiting:|r %s"):format(prefix, GOLD, table.concat(waiting, ", ")))
         waitingText:Show()
         anyText = true
     else
         waitingText:Hide()
+    end
+
+    -- Click target over the gold line: the side panel's waiting roster.
+    if not waitingButton then
+        waitingButton = CreateFrame("Button", nil, holder)
+        waitingButton:RegisterForClicks("LeftButtonUp")
+        waitingButton:SetScript("OnClick", ToggleWaitingPanel)
+        waitingButton:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Unopened vaults", 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        waitingButton:SetScript("OnLeave", GameTooltip_Hide)
+    end
+    if waitingText:IsShown() then
+        waitingButton:ClearAllPoints()
+        waitingButton:SetPoint("TOP", WeeklyRewardsFrame, "TOP", 0, WAITING_TOP)
+        waitingButton:SetSize(math.max(waitingText:GetStringWidth(), 1),
+            math.max(waitingText:GetStringHeight(), 1))
+        waitingButton:Show()
+    else
+        waitingButton:Hide()
+    end
+
+    -- Keep an open panel current with what it shows; close it when its
+    -- subject vanished (claim mode hid the stacks, or nothing waits anymore).
+    if sidePanel and sidePanel:IsShown() then
+        if sidePanel.currentKind == "slot" then
+            local slot = sidePanel.currentSlot
+            local fs = slot and slotTexts[slot]
+            if fs and fs:IsShown() then
+                FillSlotPanel(slot)
+            else
+                sidePanel:Hide()
+            end
+        elseif sidePanel.currentKind == "waiting" then
+            if waitingText:IsShown() then
+                FillWaitingPanel()
+            else
+                sidePanel:Hide()
+            end
+        end
     end
 
     holder:SetShown(anyText)
@@ -364,10 +741,16 @@ local function AttachToVault()
     holder:SetFrameLevel(400)
 
     waitingText = holder:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    waitingText:SetJustifyH("LEFT")
-    waitingText:SetPoint("TOPLEFT", WeeklyRewardsFrame, "TOPLEFT", WAITING_LEFT, WAITING_TOP)
+    waitingText:SetJustifyH("CENTER")
+    waitingText:SetPoint("TOP", WeeklyRewardsFrame, "TOP", 0, WAITING_TOP)
 
     WeeklyRewardsFrame:HookScript("OnShow", Refresh)
+    -- Closing the window only hides the panel visually (child); its own
+    -- Shown flag would survive and pop it back open on the next visit.
+    -- Close it for real when the window goes.
+    WeeklyRewardsFrame:HookScript("OnHide", function()
+        if sidePanel then sidePanel:Hide() end
+    end)
     Refresh()
 end
 
@@ -495,10 +878,20 @@ SlashCmdList.SHOWMYVAULTS = function(msg)
         ClearStore()
         Print("stored vault progress cleared.")
         return
+    elseif cmd == "test" then
+        if testChars then
+            testChars = nil
+            Print("test characters hidden.")
+        else
+            testChars = BuildTestChars()
+            Print("9 test characters shown -- open the Great Vault. Display only, nothing is saved; /smv test again or /reload clears.")
+        end
+        if holder then Refresh() end
+        return
     elseif cmd == "" or cmd == "toggle" then
         ShowMyVaultsDB.hidden = not ShowMyVaultsDB.hidden
     else
-        Print("/smv show, /smv hide, /smv clear, or /smv on its own to toggle.")
+        Print("/smv show, /smv hide, /smv clear, /smv test, or /smv on its own to toggle.")
         return
     end
 

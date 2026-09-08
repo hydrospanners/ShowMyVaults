@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 (2026-09-08)
+
+- Click the names on any reward slot and a side panel opens with everyone's
+  progress toward that slot, uncapped, you included at the bottom. The gold
+  line opens the same panel with every unopened vault. Built from the
+  vault's own art, closes with the window or with its own x.
+- The "Vault waiting" line moved up under the header text. Season 2 keeps
+  the bottom of the window busy, and the line used to collide with the
+  Collect bar there. It now shows four names and folds the rest into
+  "+N more"; the panel has the full list.
+- `/smv test` previews the whole display with nine fake characters in mixed
+  states. Nothing is saved; toggle it off or reload to clear.
+
 ## 1.0.0 (2026-08-25)
 
 - Initial release. Your other characters' Great Vault progress is stacked on
