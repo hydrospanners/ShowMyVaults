@@ -1,8 +1,8 @@
-## Interface: 120100
+## Interface: 120100, 120105
 ## Title: Show My Vaults
 ## Notes: Shows your alts' Great Vault progress, and who has an unopened vault, inside the Great Vault window.
 ## Author: Hydrospanners
-## Version: 1.1.0
+## Version: 1.1.1
 ## Category: Dungeons & Raids
 ## X-Curse-Project-ID: 1667248
 ## IconTexture: Interface\AddOns\ShowMyVaults\icon.tga

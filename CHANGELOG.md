@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1 (2026-09-29)
+
+- Marked compatible with patch 12.1.5. No behavior changes.
+
 ## 1.1.0 (2026-09-08)
 
 - Click the names on any reward slot and a side panel opens with everyone's
